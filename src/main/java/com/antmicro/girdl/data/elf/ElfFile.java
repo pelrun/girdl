@@ -18,6 +18,7 @@ package com.antmicro.girdl.data.elf;
 import com.antmicro.girdl.data.bin.ContentPolicy;
 import com.antmicro.girdl.data.bin.SegmentedBuffer;
 import com.antmicro.girdl.data.bin.SegmentedFile;
+import com.antmicro.girdl.data.elf.enums.ElfMachine;
 import com.antmicro.girdl.data.elf.enums.ElfClass;
 import com.antmicro.girdl.data.elf.enums.ElfData;
 import com.antmicro.girdl.data.elf.enums.ElfSectionFlag;
@@ -42,8 +43,23 @@ public class ElfFile implements AutoCloseable {
 	private final SegmentedBuffer symbols;
 	private final SegmentedBuffer strings;
 
+	public int elfClass;
+
 	public ElfFile(File file, /* ElfMachine */ int machine) {
 		this.file = new SegmentedFile(file, ByteOrder.LITTLE_ENDIAN);
+
+		// choose ELF class (32/64) based on machine where sensible
+		switch (machine) {
+			case ElfMachine.X86_64:
+			case ElfMachine.PPC64:
+			case ElfMachine.SPARCV9:
+			case ElfMachine.IA_64:
+			case ElfMachine.AARCH64:
+				this.elfClass = ElfClass.BIT_64;
+				break;
+			default:
+				this.elfClass = ElfClass.BIT_32;
+		}
 
 		SegmentedBuffer root = this.file.getRootBuffer();
 		SegmentedBuffer header = root.putSegment().setName("ELF Header");
@@ -56,14 +72,16 @@ public class ElfFile implements AutoCloseable {
 		createSection(".note.GNU-stack", ElfSectionType.PROGBITS, ElfSectionFlag.NONE, 0, 0, null);
 
 		strings = createSection(".strtab", ElfSectionType.STRTAB, ElfSectionFlag.NONE, 0, 0, null);
-		symbols = createSection(".symtab", ElfSectionType.SYMTAB, ElfSectionFlag.NONE, 8, 0x18, strings);
+		int symAlign = (elfClass == ElfClass.BIT_32) ? 4 : 8;
+		int symEntry = (elfClass == ElfClass.BIT_32) ? 0x10 : 0x18;
+		symbols = createSection(".symtab", ElfSectionType.SYMTAB, ElfSectionFlag.NONE, symAlign, symEntry, strings);
 
 		strings.putByte(0);
 
 		// ELF identification, 16 bytes
 		SegmentedBuffer magic = header.putSegment().setName("ELF Identification");
 		magic.putBytes(0x7f, 'E', 'L', 'F');
-		magic.putByte(ElfClass.BIT_64);
+		magic.putByte(elfClass);
 		magic.putByte(ElfData.LSB_2);
 		magic.putByte(ELF_VERSION);
 		magic.fillUpToWith(16, 0);
@@ -72,21 +90,24 @@ public class ElfFile implements AutoCloseable {
 		header.putShort(ElfType.REL);
 		header.putShort(machine);
 		header.putInt(ELF_VERSION);
-		header.putLong(0); // entry point
-		header.putLong(0); // program header offset
-		header.putLong(shdrs::offset); // section header offset
+
+		if (elfClass == ElfClass.BIT_32) {
+			header.putInt(0); // entry point
+			header.putInt(0); // program header offset
+			header.putInt(() -> shdrs.offset()); // section header offset
+		} else {
+			header.putLong(0); // entry point
+			header.putLong(0); // program header offset
+			header.putLong(() -> shdrs.offset()); // section header offset
+		}
 
 		header.putInt(0); // flags
-		header.putShort(header::size); // header size
-		header.putShort(0); // program header size
+		header.putShort(() -> header.size()); // header size
+		header.putShort(0); // program header entry size
 		header.putShort(0); // program header number
 		header.putShort(() -> shdrs.children().getFirst().size()); // section header size
 		header.putShort(() -> shdrs.children().size()); // section header number
 		header.putShort(() -> sdats.indexOf(shstrtab)); // string section index
-
-		header.putShort(0); // section header size
-		header.putShort(0); // section header number
-		header.putShort(0); // string section index
 	}
 
 	@Override
@@ -104,16 +125,26 @@ public class ElfFile implements AutoCloseable {
 	 * @param flag One of the ElfSymbolFlags, except LOCAL
 	 */
 	public void createSymbol(String name, long address, int size, /* ElfSymbolFlag */ int flag, SegmentedBuffer section) {
+
 		int offset = strings.size();
 		strings.putString(name);
 
-		// symbol definition
-		symbols.putInt(offset);
-		symbols.putByte(flag); // info
-		symbols.putByte(0); // other
-		symbols.putShort(sdats.indexOf(section)); // section
-		symbols.putLong(address);
-		symbols.putLong(size);
+		if (elfClass == ElfClass.BIT_32) {
+			symbols.putInt(offset);
+			symbols.putInt((int) address);
+			symbols.putInt(size);
+			symbols.putByte(flag); // info
+			symbols.putByte(0); // other
+			symbols.putShort(sdats.indexOf(section)); // section
+		} else {
+			// symbol definition
+			symbols.putInt(offset);
+			symbols.putByte(flag); // info
+			symbols.putByte(0); // other
+			symbols.putShort(sdats.indexOf(section)); // section
+			symbols.putLong(address);
+			symbols.putLong(size);
+		}
 	}
 
 	/**
@@ -127,7 +158,7 @@ public class ElfFile implements AutoCloseable {
 	 * @param element Element size, by default use 0
 	 * @param linked The buffer "linked" to this section using sh_link, can be null
 	 */
-	public SegmentedBuffer createSection(String name, /* ElfSectionType */ int type, /* ElfSectionFlag */ int flags, int align, int element, SegmentedBuffer linked) {
+	private SegmentedBuffer createSection64(String name, /* ElfSectionType */ int type, /* ElfSectionFlag */ int flags, int align, int element, SegmentedBuffer linked) {
 		SegmentedBuffer header = shdrs.putSegment().setName(name).setPolicy(ContentPolicy.DATA);
 		SegmentedBuffer content = sdats.putSegment().setName(name).setAlignment(align);
 
@@ -145,8 +176,8 @@ public class ElfFile implements AutoCloseable {
 		header.putLong(0); // address
 
 		if (!empty) {
-			header.putLong(content::offset);
-			header.putLong(content::size);
+            header.putLong(() -> content.offset());
+            header.putLong(() -> content.size());
 		} else {
 			header.putSpace(16, 0);
 		}
@@ -161,6 +192,51 @@ public class ElfFile implements AutoCloseable {
 		}
 
 		return content;
+	}
+
+	private SegmentedBuffer createSection32(String name, /* ElfSectionType */ int type, /* ElfSectionFlag */ int flags, int align, int element, SegmentedBuffer linked) {
+		SegmentedBuffer header = shdrs.putSegment().setName(name).setPolicy(ContentPolicy.DATA);
+		SegmentedBuffer content = sdats.putSegment().setName(name).setAlignment(align);
+
+		boolean empty = (type == ElfSectionType.NULL);
+
+		if (name.equals(SECTION_STRINGS)) {
+			// string tables must start with \0
+			content.putByte(0);
+			shstrtab = content;
+		}
+
+		header.putInt(shstrtab == null ? 0 : shstrtab.size()); // name offset
+		header.putInt(type); // section type
+		header.putInt(flags); // flags
+		header.putInt(0); // address
+
+		if (!empty) {
+			header.putInt(() -> content.offset());
+			header.putInt(() -> content.size());
+		} else {
+			header.putSpace(8, 0);
+		}
+
+		header.putInt(linked == null ? UNDEF_SECTION : sdats.indexOf(linked)); // link
+		header.putInt(UNDEF_SECTION); // info
+		header.putInt(align); // addralign
+		header.putInt(element); // entry size
+
+		if (!name.isEmpty()) {
+			shstrtab.putString(name);
+		}
+
+		return content;
+	}
+
+	public SegmentedBuffer createSection(String name, /* ElfSectionType */ int type, /* ElfSectionFlag */ int flags, int align, int element, SegmentedBuffer linked) {
+
+		if (elfClass == ElfClass.BIT_32){
+			return createSection32(name, type, flags, align, element, linked);
+		} else {
+			return createSection64(name, type, flags, align, element, linked);
+		}
 	}
 
 }

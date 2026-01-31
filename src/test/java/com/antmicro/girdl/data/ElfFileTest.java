@@ -171,7 +171,7 @@ public class ElfFileTest {
 		Assertions.assertTrue(outer.isAnonymous());
 
 		try (DwarfFile dwarf = new DwarfFile(temp, ElfMachine.I386, 32)) {
-			dwarf.createGlobalVariable(outer, "name", Storage.ofAddress(0x1234567890L));
+			dwarf.createGlobalVariable(outer, "name", Storage.ofAddress(0x34567890));
 		}
 
 		String all = Util.runCommand("readelf",  "-aw", temp.getAbsolutePath()).error();
@@ -179,7 +179,7 @@ public class ElfFileTest {
 		Assertions.assertFalse(all.contains("Warning"));
 
 		String symbols = Util.runCommand("readelf", "-s", temp.getAbsolutePath()).output();
-		Assertions.assertTrue(symbols.contains("0: 0000001234567890     4 OBJECT  GLOBAL DEFAULT    5 name"));
+		Assertions.assertTrue(symbols.contains("0: 34567890     4 OBJECT  GLOBAL DEFAULT    5 name"));
 
 		String debug = Util.runCommand("readelf", "-w", temp.getAbsolutePath()).output();
 		Assertions.assertFalse(debug.contains("this_name_should_not_be_saved"));
